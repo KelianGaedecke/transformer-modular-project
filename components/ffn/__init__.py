@@ -1,1 +1,1 @@
-from .ffn import StandardFFN
+from .ffn import StandardFFN, SwiGLUFFN
