@@ -1,1 +1,2 @@
 from .MultiHeadAttention import MultiHeadAttention
+from .MultiScaleAttention import MultiScaleAttention

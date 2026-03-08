@@ -45,13 +45,23 @@ class PointCloudTransformerConfig:
     d_ff:     int   = None            # FFN hidden dim (default: 4 * d_model)
 
     # ── Strategy names (looked up in registry) ────────────────────────────────
-    pe:   str = 'fourier3d'   # positional encoding: none | fourier3d
-    attn: str = 'mha'         # attention: mha | gqa | flash
-    ffn:  str = 'standard'    # feed-forward: standard | swiglu
+    pe:   str = 'fourier3d'   # positional encoding:  none | fourier3d | distance_bias
+    attn: str = 'mha'         # attention:            mha | multiscale
+    ffn:  str = 'standard'    # feed-forward:         standard | swiglu
+    mp:   str = 'none'        # message passing:      none | schnet
 
     # ── Attention-specific ────────────────────────────────────────────────────
-    n_kv_heads: Optional[int] = None  # for GQA: number of key/value heads
-                                      # (None = same as n_heads, i.e. standard MHA)
+    n_kv_heads:   Optional[int]  = None  # for GQA: number of key/value heads
+                                         # (None = same as n_heads, i.e. standard MHA)
+    attn_kwargs:  dict = field(default_factory=dict)
+    # Extra kwargs for attention constructor.
+    # Used by multiscale: attn_kwargs={'cutoffs': [2.0, 5.0, None]}
+    # cutoffs is a list (one per head-group); None = full attention for that group.
+
+    # ── Message passing kwargs ────────────────────────────────────────────────
+    mp_kwargs: dict = field(default_factory=dict)
+    # Extra kwargs for the message passing constructor.
+    # Example: mp='schnet', mp_kwargs={'n_rbf': 32}
 
     # ── Output ───────────────────────────────────────────────────────────────
     output_dim: Optional[int] = None  # if set, adds a final Linear(d_model → output_dim)
@@ -96,8 +106,8 @@ class PointCloudTransformerConfig:
         assert self.pe in ('none', 'fourier3d', 'distance_bias'), (
             f"Unknown pe '{self.pe}'. Use: none, fourier3d, distance_bias"
         )
-        assert self.attn in ('mha', 'gqa', 'flash'), (
-            f"Unknown attn '{self.attn}'. Use: mha, gqa, flash"
+        assert self.attn in ('mha', 'multiscale'), (
+            f"Unknown attn '{self.attn}'. Use: mha, multiscale"
         )
         assert self.ffn in ('standard', 'swiglu'), (
             f"Unknown ffn '{self.ffn}'. Use: standard, swiglu"

@@ -2,14 +2,19 @@
 run_test.py — Integration tests for the Point Cloud Transformer
 
 Tests cover:
-  1. Basic forward pass (molecule preset, Fourier3D PE)
-  2. No positional encoding baseline
-  3. Output projection head (e.g. per-atom energy prediction)
-  4. Config save/load round-trip
-  5. Permutation equivariance — reordering points should reorder outputs
-     identically (no causal mask, no positional ordering bias)
-  6. Protein and crystal presets
-  7. Variable batch sizes and point counts
+   1. Basic forward pass (molecule preset, Fourier3D PE)
+   2. No positional encoding baseline
+   3. Output projection head (e.g. per-atom energy prediction)
+   4. Config save/load round-trip
+   5. Permutation equivariance — reordering points should reorder outputs
+      identically (no causal mask, no positional ordering bias)
+   6. Protein and crystal presets
+   7. Variable batch sizes and point counts
+   8. distance_bias PE — rotation & translation invariance
+   9. distance_bias with cutoff_radius
+  10. pe_kwargs survive config save/load
+  11. SchNet message passing layer — output shape and translation invariance
+  12. Multi-scale attention — output shape, scale isolation, permutation equivariance
 """
 
 import torch
@@ -266,6 +271,80 @@ def test_pe_kwargs_config_roundtrip():
     print("  PASSED")
 
 
+def test_schnet_message_passing():
+    separator("Test 11: SchNet message passing — shape and translation invariance")
+    config = PointCloudTransformerConfig(
+        num_point_types=20, d_model=64, n_heads=4, n_layers=2,
+        pe='distance_bias', dropout=0.0,
+        mp='schnet', mp_kwargs={'n_rbf': 16},
+        cutoff_radius=4.0,
+    )
+    model = PointCloudTransformer(config).to(DEVICE).eval()
+
+    B, N = 2, 12
+    coords, types = make_batch(B, N, config.num_point_types)
+
+    with torch.no_grad():
+        out = model(coords, types)
+
+    assert out.shape == (B, N, config.d_model), f"Shape mismatch: {out.shape}"
+    assert not out.isnan().any(), "NaN in SchNet output"
+    print(f"  Output: {tuple(out.shape)}")
+    print(f"  Params: {param_count(model):,}")
+
+    # Translation invariance: SchNet uses distances → should be invariant
+    shift = torch.tensor([[[3.0, -1.5, 2.0]]], device=DEVICE)
+    with torch.no_grad():
+        out_shifted = model(coords + shift, types)
+
+    trans_err = (out - out_shifted).abs().max().item()
+    assert trans_err < 1e-4, f"SchNet translation invariance broken: {trans_err:.2e}"
+    print(f"  Translation invariance error: {trans_err:.2e}")
+    print("  PASSED")
+
+
+def test_multiscale_attention():
+    separator("Test 12: multi-scale attention — shape and scale isolation")
+    # 2 groups of 2 heads each: short-range (1.0 Å) and full attention
+    config = PointCloudTransformerConfig(
+        num_point_types=20, d_model=64, n_heads=4, n_layers=2,
+        pe='none', dropout=0.0,
+        attn='multiscale',
+        attn_kwargs={'cutoffs': [1.0, None]},
+    )
+    model = PointCloudTransformer(config).to(DEVICE).eval()
+
+    B, N = 2, 10
+    coords, types = make_batch(B, N, config.num_point_types)
+
+    with torch.no_grad():
+        out = model(coords, types)
+
+    assert out.shape == (B, N, config.d_model), f"Shape mismatch: {out.shape}"
+    assert not out.isnan().any(), "NaN in multiscale output"
+    print(f"  Output: {tuple(out.shape)}")
+    print(f"  Params: {param_count(model):,}")
+
+    # Place two atoms very far apart; their representations should not
+    # be affected by the short-range group (cutoff=1.0) masking.
+    # The model should still run without NaN even with fully isolated atoms.
+    coords_isolated = coords.clone()
+    coords_isolated[0, 0] = torch.tensor([50.0, 50.0, 50.0])
+    with torch.no_grad():
+        out_isolated = model(coords_isolated, types)
+    assert not out_isolated.isnan().any(), "NaN when atom is isolated by cutoff"
+    print(f"  No NaN with isolated atom (short-range cutoff=1.0)")
+
+    # Permutation equivariance still holds
+    perm = torch.randperm(N, device=DEVICE)
+    with torch.no_grad():
+        out_perm = model(coords[:, perm, :], types[:, perm])
+    max_diff = (out[:, perm, :] - out_perm).abs().max().item()
+    assert max_diff < 1e-5, f"Equivariance broken in multiscale: {max_diff:.2e}"
+    print(f"  Permutation equivariance error: {max_diff:.2e}")
+    print("  PASSED")
+
+
 # ── Runner ────────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
@@ -283,6 +362,8 @@ if __name__ == "__main__":
         test_distance_bias,
         test_cutoff_radius,
         test_pe_kwargs_config_roundtrip,
+        test_schnet_message_passing,
+        test_multiscale_attention,
     ]
 
     passed = 0

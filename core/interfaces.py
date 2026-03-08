@@ -106,3 +106,26 @@ class FFNStrategy(ABC, nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """x: (batch, N, d_model) → (batch, N, d_model)"""
         ...
+
+
+# ─── Message Passing Interface ────────────────────────────────────────────────
+
+class MessagePassingStrategy(ABC, nn.Module):
+    """
+    Contract for graph-style message passing layers.
+
+    These layers aggregate neighbour information using spatial distances,
+    complementing the global attention with explicitly local operations.
+
+    Input / output: (batch, N, d_model) — same shape as attention.
+    coords is always required so the layer can compute neighbour distances.
+    """
+
+    @abstractmethod
+    def forward(
+        self,
+        x:      torch.Tensor,           # (batch, N, d_model)
+        coords: torch.Tensor,           # (batch, N, coord_dim)
+    ) -> torch.Tensor:
+        """Returns updated node features of shape (batch, N, d_model)."""
+        ...

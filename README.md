@@ -193,6 +193,74 @@ Note: memory is still O(N²). For truly sparse computation (N > ~2000), a neighb
 
 ---
 
+## Attention strategies
+
+| `attn=`        | Description |
+|----------------|-------------|
+| `'mha'`        | Standard multi-head attention — every point attends to every other |
+| `'multiscale'` | Head-group attention with per-group spatial cutoffs (see below) |
+
+### `'multiscale'`
+
+Splits `n_heads` into groups, each group attending at a different spatial scale.
+Configure via `attn_kwargs`:
+
+```python
+config = PointCloudTransformerConfig(
+    d_model=128, n_heads=6,   # 6 heads, 3 groups of 2
+    attn='multiscale',
+    attn_kwargs={'cutoffs': [2.0, 5.0, None]},
+    # cutoffs[0]=2.0 → heads 0,1 see only atoms within 2 Å  (covalent bonds)
+    # cutoffs[1]=5.0 → heads 2,3 see atoms within 5 Å       (non-bonded)
+    # cutoffs[2]=None → heads 4,5 have full N² attention     (long-range)
+)
+```
+
+`len(cutoffs)` must divide `n_heads` evenly.
+The additive PE bias from `distance_bias` is still applied on top of the scale masks.
+
+---
+
+## Message passing strategies
+
+An optional SchNet-style message passing sublayer can be added after the FFN
+in every TransformerBlock. It aggregates local neighbour information using
+learned distance filters — complementing global attention with explicitly
+local structure.
+
+| `mp=`      | Description |
+|------------|-------------|
+| `'none'`   | No message passing (default) |
+| `'schnet'` | SchNet continuous-filter convolution |
+
+### `'schnet'`
+
+For each node `i`:
+```
+agg_i = Σ_{j} x_j ⊙ filter_net(rbf(d_ij))
+```
+
+- `d_ij = ‖r_i − r_j‖` — pairwise distance
+- `rbf(d)` — Gaussian RBF expansion (fixed centers, learnable width)
+- `filter_net` — two-layer MLP with SiLU: maps RBF features to a per-channel gate
+- `⊙` — element-wise product gates each neighbour's features
+
+Configure via `mp_kwargs`:
+
+```python
+config = PointCloudTransformerConfig(
+    pe='distance_bias',
+    mp='schnet',
+    cutoff_radius=5.0,          # cutoff is shared with the PE
+    mp_kwargs={'n_rbf': 32},    # finer RBF grid for the filter network
+)
+```
+
+SchNet is **translation and rotation invariant** (uses only pairwise distances).
+Memory cost is O(N²) per layer.
+
+---
+
 ## Built-in presets
 
 ```python
@@ -254,22 +322,26 @@ The same pattern applies to `AttentionStrategy` (`@register('attn', ...)`) and `
 ```
 core/
   config.py        — PointCloudTransformerConfig (all hyperparameters)
-  interfaces.py    — ABCs: PositionalEmbedding, AttentionStrategy, FFNStrategy
+  interfaces.py    — ABCs: PositionalEmbedding, AttentionStrategy, FFNStrategy,
+                     MessagePassingStrategy
   registry.py      — @register decorator + build() factory
 
 model/
   transformer.py   — PointCloudTransformer (top-level model)
-  block.py         — TransformerBlock (attention + FFN + residuals)
+  block.py         — TransformerBlock (attention + FFN + optional MP + residuals)
 
 components/
   positional/
     SinusoidalEmbedding.py  — none | fourier3d | distance_bias
   attention/
     MultiHeadAttention.py   — mha
+    MultiScaleAttention.py  — multiscale
   ffn/
     ffn.py                  — standard | swiglu
+  message_passing/
+    schnet.py               — schnet
 
-run_test.py        — 10 integration tests
+run_test.py        — 12 integration tests
 ```
 
 ---
@@ -280,4 +352,4 @@ run_test.py        — 10 integration tests
 python run_test.py
 ```
 
-Tests cover: forward pass shapes, no-PE baseline, output head, permutation equivariance, config save/load, protein preset (SwiGLU), variable point counts, rotation/translation invariance of `distance_bias`, cutoff radius behavior, and `pe_kwargs` round-trip serialization.
+Tests cover: forward pass shapes, no-PE baseline, output head, permutation equivariance, config save/load, protein preset (SwiGLU), variable point counts, rotation/translation invariance of `distance_bias`, cutoff radius behavior, `pe_kwargs` round-trip serialization, SchNet message passing (shape + translation invariance), and multi-scale attention (shape, isolated-atom NaN safety, permutation equivariance).
